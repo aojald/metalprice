@@ -294,10 +294,15 @@
       margin-top: 1rem;
       padding-top: 1rem;
       border-top: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.5rem;
+      align-items: center;
     }
 
     .footer-note a { color: var(--silver-dim); text-decoration: none; }
     .footer-note a:hover { text-decoration: underline; color: var(--silver); }
+    .footer-meta { font-family: 'JetBrains Mono', monospace; }
   </style>
 </head>
 <body>
@@ -354,7 +359,9 @@
     </section>
 
     <p class="footer-note">
-      Data: <code>metal_prices_last_month_mt.csv</code> — dailymetalprice.com + Frankfurter EUR/USD.
+      <span>Data: <code>metal_prices_source_mt.csv</code> — dailymetalprice.com + Frankfurter EUR/USD.</span>
+      <span class="footer-meta" id="embedded-last-date">Last data: —</span>
+      <span class="footer-meta" id="embedded-generated-at">Generated: —</span>
     </p>
   </div>
 
@@ -363,6 +370,7 @@
   const METALS = ['gold', 'aluminum', 'silver', 'copper', 'lithium'];
   const METAL_LABELS = { gold: 'Gold', silver: 'Silver', copper: 'Copper', aluminum: 'Aluminum', lithium: 'Lithium' };
   const METAL_UNITS = { gold: 'oz', silver: 'oz', aluminum: 'mt', copper: 'mt', lithium: 'mt' };
+  const EMBEDDED_GENERATED_AT = '2026-03-10 22:45:51 CET';
 
   const EMBEDDED_CSV = `date,gold_usd_oz,gold_eur_oz,silver_usd_oz,silver_eur_oz,aluminum_usd_mt,aluminum_eur_mt,copper_usd_mt,copper_eur_mt,lithium_usd_mt,lithium_eur_mt
 2026-01-01,4319.8200,,71.2600,,2998.2892,,12456.1280,,16950.0000,
@@ -886,6 +894,9 @@
   }
 
   function init() {
+    const lastEmbeddedDate = state.data.dates[state.data.dates.length - 1] || '—';
+    document.getElementById('embedded-last-date').textContent = `Last data: ${lastEmbeddedDate}`;
+    document.getElementById('embedded-generated-at').textContent = `Generated: ${EMBEDDED_GENERATED_AT}`;
     document.getElementById('curr-usd').addEventListener('click', () => {
       state.currency = 'usd';
       document.getElementById('curr-usd').classList.add('active');
