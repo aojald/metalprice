@@ -7,7 +7,7 @@ Daily workflow:
 
 What it does:
   1. Fetch the recent price series directly from dailymetalprice.com pages.
-  2. Merge those fresh points into a single source CSV.
+  2. Merge those fresh points into a single source CSV while preserving older history.
   3. Forward-fill missing non-trading days in that source CSV.
   4. Recompute EUR columns from Frankfurter USD->EUR rates.
   5. Export a short rolling snapshot used by dashboard.html.
@@ -34,6 +34,7 @@ BASE_HTTP = "http://www.dailymetalprice.com"
 SOURCE_CSV = "metal_prices_source_mt.csv"
 DASHBOARD_CSV = "metal_prices_last_month_mt.csv"
 DASHBOARD_HTML = "dashboard.html"
+DEFAULT_BOOTSTRAP_CSV = DASHBOARD_CSV
 FETCH_DAYS = 20
 DASHBOARD_CALENDAR_DAYS = 31
 HTTP_TIMEOUT = 20
@@ -154,11 +155,11 @@ def load_existing_rows(path: str) -> dict[str, dict[str, str]]:
         return {}
 
 
-def load_existing_source_with_bootstrap(source_path: str, bootstrap_path: str) -> dict[str, dict[str, str]]:
+def load_existing_source_with_bootstrap(source_path: str, bootstrap_path: str | None) -> dict[str, dict[str, str]]:
     rows = load_existing_rows(source_path)
     if rows:
         return rows
-    if source_path != bootstrap_path:
+    if bootstrap_path and source_path != bootstrap_path:
         return load_existing_rows(bootstrap_path)
     return {}
 
@@ -266,6 +267,12 @@ def embed_dashboard_csv(csv_path: str, dashboard_path: str) -> None:
 
     escaped_csv = escape_js_template_literal(csv_content)
     updated_html = html[: match.start(2)] + escaped_csv + html[match.end(2) :]
+    generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    updated_html = re.sub(
+        r"const\s+EMBEDDED_GENERATED_AT\s*=\s*'[^']*';",
+        lambda _: f"const EMBEDDED_GENERATED_AT = '{generated_at}';",
+        updated_html,
+    )
     with open(dashboard_path, "w", encoding="utf-8") as handle:
         handle.write(updated_html)
 
@@ -321,54 +328,110 @@ def parse_args() -> argparse.Namespace:
         help=f"Dashboard HTML file whose embedded CSV should be refreshed (default: {DASHBOARD_HTML})",
     )
     parser.add_argument(
+        "--bootstrap-csv",
+        default=DEFAULT_BOOTSTRAP_CSV,
+        help=(
+            "CSV used only if the canonical source CSV does not exist yet "
+            f"(default: {DEFAULT_BOOTSTRAP_CSV})"
+        ),
+    )
+    parser.add_argument(
         "--no-embed-dashboard",
         action="store_true",
         help="Skip embedding the regenerated dashboard CSV into the dashboard HTML file",
     )
+    parser.add_argument(
+        "--fail-on-fetch-error",
+        action="store_true",
+        help=(
+            "Exit with error if fresh metal or FX fetch fails. "
+            "By default, the script falls back to existing source data when available."
+        ),
+    )
     return parser.parse_args()
+
+
+def resolve_path(path: str) -> str:
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+
+
+def write_outputs(
+    rows_by_date: dict[str, dict[str, str]],
+    source_csv: str,
+    dashboard_csv: str,
+    dashboard_html: str,
+    dashboard_calendar_days: int,
+    no_embed_dashboard: bool,
+) -> tuple[int, int]:
+    write_rows(source_csv, rows_by_date)
+    recent_dates = slice_recent_dates(rows_by_date, dashboard_calendar_days)
+    write_rows(dashboard_csv, rows_by_date, recent_dates)
+    if not no_embed_dashboard:
+        embed_dashboard_csv(resolve_path(source_csv), resolve_path(dashboard_html))
+    return len(rows_by_date), len(recent_dates)
 
 
 def main() -> None:
     args = parse_args()
 
+    print(f"Loading existing source CSV: {args.source_csv}")
+    existing_rows = load_existing_source_with_bootstrap(args.source_csv, args.bootstrap_csv)
+    if existing_rows:
+        existing_dates = sorted(existing_rows)
+        print(f"Preserving existing history: {existing_dates[0]} -> {existing_dates[-1]} ({len(existing_dates)} rows)")
+    elif args.bootstrap_csv:
+        print(f"No source CSV found. Bootstrap source: {args.bootstrap_csv}")
+
     print("Fetching fresh metal series...")
     fresh_by_metal: dict[str, dict[str, float]] = {}
-    for name in METALS:
-        series = fetch_recent_series(name, args.fetch_days)
-        fresh_by_metal[name] = series
-        print(f"  {name}: {len(series)} points")
+    try:
+        for name in METALS:
+            series = fetch_recent_series(name, args.fetch_days)
+            fresh_by_metal[name] = series
+            print(f"  {name}: {len(series)} points")
+    except Exception as exc:
+        if args.fail_on_fetch_error or not existing_rows:
+            raise SystemExit(f"Fresh metal fetch failed and no fallback is available: {exc}") from exc
+        print(f"Warning: fresh metal fetch failed ({exc}). Keeping existing files unchanged.")
+        return
 
     all_fresh_dates = sorted({date_str for series in fresh_by_metal.values() for date_str in series})
     if not all_fresh_dates:
-        raise SystemExit("No fresh data was fetched.")
+        if args.fail_on_fetch_error or not existing_rows:
+            raise SystemExit("No fresh data was fetched and no fallback is available.")
+        print("Warning: no fresh data was fetched. Keeping existing files unchanged.")
+        return
 
-    print(f"Loading existing source CSV: {args.source_csv}")
-    existing_rows = load_existing_source_with_bootstrap(args.source_csv, args.dashboard_csv)
     merged_rows = merge_series(existing_rows, fresh_by_metal)
     filled_rows = forward_fill_usd(merged_rows)
 
     start_date = min(filled_rows)
     end_date = max(filled_rows)
     print(f"Fetching USD->EUR rates for {start_date}..{end_date}")
-    fx_rates = fetch_eur_usd(start_date, end_date)
+    try:
+        fx_rates = fetch_eur_usd(start_date, end_date)
+    except Exception as exc:
+        if args.fail_on_fetch_error or not existing_rows:
+            raise SystemExit(f"FX fetch failed and no fallback is available: {exc}") from exc
+        print(f"Warning: FX fetch failed ({exc}). Keeping existing files unchanged.")
+        return
     recompute_eur_columns(filled_rows, fx_rates)
 
-    write_rows(args.source_csv, filled_rows)
-    recent_dates = slice_recent_dates(filled_rows, args.dashboard_calendar_days)
-    write_rows(args.dashboard_csv, filled_rows, recent_dates)
-    if not args.no_embed_dashboard:
-        dashboard_html_path = args.dashboard_html
-        if not os.path.isabs(dashboard_html_path):
-            dashboard_html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), dashboard_html_path)
-        dashboard_csv_path = args.dashboard_csv
-        if not os.path.isabs(dashboard_csv_path):
-            dashboard_csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), dashboard_csv_path)
-        embed_dashboard_csv(dashboard_csv_path, dashboard_html_path)
+    source_rows, dashboard_rows = write_outputs(
+        filled_rows,
+        args.source_csv,
+        args.dashboard_csv,
+        args.dashboard_html,
+        args.dashboard_calendar_days,
+        args.no_embed_dashboard,
+    )
 
-    print(f"Updated {args.source_csv} with {len(filled_rows)} rows.")
-    print(f"Updated {args.dashboard_csv} with {len(recent_dates)} rows.")
+    print(f"Updated {args.source_csv} with {source_rows} rows.")
+    print(f"Updated {args.dashboard_csv} with {dashboard_rows} rows.")
     if not args.no_embed_dashboard:
-        print(f"Updated {args.dashboard_html} with embedded CSV data.")
+        print(f"Updated {args.dashboard_html} with embedded full-history CSV data from {args.source_csv}.")
 
 
 if __name__ == "__main__":
