@@ -24,7 +24,9 @@ import csv
 import json
 import os
 import re
+import shutil
 import ssl
+import subprocess
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -74,10 +76,39 @@ def make_request(url: str) -> urllib.request.Request:
     return urllib.request.Request(url, headers=HEADERS)
 
 
-def urlopen_text(url: str) -> str:
+def urlopen_text_urllib(url: str) -> str:
     ctx = ssl.create_default_context()
     with urllib.request.urlopen(make_request(url), timeout=HTTP_TIMEOUT, context=ctx) as response:
         return response.read().decode("utf-8", errors="replace")
+
+
+def urlopen_text_curl(url: str) -> str:
+    curl_bin = shutil.which("curl") or "/usr/bin/curl"
+    result = subprocess.run(
+        [
+            curl_bin,
+            "-fsSL",
+            "--max-time",
+            str(HTTP_TIMEOUT),
+            "-A",
+            HEADERS["User-Agent"],
+            url,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def urlopen_text(url: str) -> str:
+    # Prefer curl when available: dailymetalprice sits behind Cloudflare and can
+    # reject Python urllib while still serving curl/browser clients.
+    if shutil.which("curl") or os.path.exists("/usr/bin/curl"):
+        try:
+            return urlopen_text_curl(url)
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    return urlopen_text_urllib(url)
 
 
 def normalize_date(value: int | float | str | None) -> str | None:
@@ -99,11 +130,27 @@ def normalize_date(value: int | float | str | None) -> str | None:
 
 
 def parse_chart_series_html(html: str) -> list[tuple[str, float]]:
-    match = re.search(r"data:\s*\[(.*?)\]\s*,\s*backgroundColor:", html, re.DOTALL | re.IGNORECASE)
+    # Chart.js payload used to be `data: [[ts, val], ...], backgroundColor:`.
+    # The site now appends `.map(localNoon)` before the next property.
+    match = re.search(
+        r"data:\s*\[(.*?)\](?:\.map\([^)]*\))?\s*,\s*backgroundColor:",
+        html,
+        re.DOTALL | re.IGNORECASE,
+    )
     if not match:
-        return []
+        # Fallback: first inline array of [timestamp, value] pairs.
+        match = re.search(
+            r"\[\s*\[\s*\d{10,13}\s*,\s*[-+]?\d+(?:\.\d+)?\s*\]"
+            r"(?:\s*,\s*\[\s*\d{10,13}\s*,\s*[-+]?\d+(?:\.\d+)?\s*\])*\s*\]",
+            html,
+            re.DOTALL,
+        )
+        payload = match.group(0) if match else ""
+    else:
+        payload = match.group(1)
+
     out: list[tuple[str, float]] = []
-    for ts_raw, val_raw in re.findall(r"\[\s*(\d{10,13})\s*,\s*([-+]?\d+(?:\.\d+)?)\s*\]", match.group(1)):
+    for ts_raw, val_raw in re.findall(r"\[\s*(\d{10,13})\s*,\s*([-+]?\d+(?:\.\d+)?)\s*\]", payload):
         date_str = normalize_date(int(ts_raw))
         if not date_str:
             continue

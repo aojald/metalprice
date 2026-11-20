@@ -24,10 +24,11 @@ open dashboard.html
 |------|-------------|
 | **export_metal_prices_csv.py** | Fetches the recent metal series, merges it into a single source CSV, recomputes EUR values, regenerates the dashboard snapshot, and refreshes the embedded CSV in `dashboard.html`. |
 | **metal_prices_source_mt.csv** | Canonical source CSV updated incrementally day after day. |
-| **metal_prices_last_month_mt.csv** | Last ~20 trading days (oz for Au/Ag, mt for Al/Cu/Li), forward-filled. |
+| **metal_prices_last_month_mt.csv** | Short rolling snapshot (~1 month) kept as a convenience export. |
 | **dashboard.html** | Single-file dashboard: metal cards, USD/EUR or EUR/USD FX chart, line/candlestick, Day/Week/Month. |
 | **update_dashboard_embedded_csv.py** | Optional manual helper to replace the CSV embedded in `dashboard.html`. |
 | **run_daily.sh** | Small helper that runs the standard daily refresh flow with `python3.11`. |
+| **publish_daily.sh** | Runs the local refresh, commits changed data files, and pushes them to GitHub. |
 | **.github/workflows/** | GitHub Actions for daily refresh and GitHub Pages deployment. |
 
 ---
@@ -36,8 +37,8 @@ open dashboard.html
 
 - **Data source:** dailymetalprice.com page HTML. The script parses the inline Chart.js series embedded in `metalprices.php`.
 - **FX:** Frankfurter API for EUR/USD.
-- **Storage model:** one canonical file, `metal_prices_source_mt.csv`, updated incrementally. Each run also regenerates `metal_prices_last_month_mt.csv` for the dashboard.
-- **Dashboard embed:** by default, each run also updates `dashboard.html` so the portable dashboard stays current.
+- **Storage model:** one canonical file, `metal_prices_source_mt.csv`, updated incrementally. Existing history is preserved; each run only merges fresh recent points, then regenerates `metal_prices_last_month_mt.csv` as a short rolling snapshot.
+- **Dashboard embed:** by default, each run also updates `dashboard.html` using the full `metal_prices_source_mt.csv`, so the portable dashboard keeps all available history.
 
 **Usage:**
 
@@ -50,6 +51,7 @@ Useful options:
 - `--source-csv path/to/file.csv` — use another canonical source file.
 - `--dashboard-csv path/to/file.csv` — write the rolling dashboard snapshot somewhere else.
 - `--dashboard-html path/to/dashboard.html` — choose which HTML dashboard to refresh.
+- `--bootstrap-csv path/to/file.csv` — initialize the canonical source CSV from another CSV if it does not exist yet.
 - `--fetch-days 20` — number of recent source points requested from the provider.
 - `--dashboard-calendar-days 31` — width of the snapshot exported for the dashboard.
 - `--no-embed-dashboard` — skip updating `dashboard.html`.
@@ -65,7 +67,7 @@ Useful options:
 - **Features:** metal cards (last price + sparkline, USD/oz for Gold/Silver and USD/mt for Al/Cu/Li), **USD/EUR** or **EUR/USD** mini chart next to the cards (depending on selected currency), main chart (line or candlestick), Day / Week / Month, “Load CSV” to pick another file.
 - **Libraries:** Chart.js and Lightweight Charts (TradingView) from CDN.
 
-Open `dashboard.html` in a browser. A normal run of `export_metal_prices_csv.py` already refreshes the embedded CSV automatically.
+Open `dashboard.html` in a browser. A normal run of `export_metal_prices_csv.py` already refreshes the embedded CSV automatically with the full historical source CSV.
 
 ---
 
@@ -106,6 +108,12 @@ Or use the helper:
 
 ```bash
 ./run_daily.sh
+```
+
+To refresh and publish in one command from your machine:
+
+```bash
+./publish_daily.sh
 ```
 
 ---
